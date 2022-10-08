@@ -49,19 +49,11 @@ def parse_response(response: requests.models.Response) -> Dict:
     return content['result'][0]
 
 
-# Note: Feel free to suggest more here via a PR.
-_MARKETS = {
-    'us_market': 'USD',
-    'ca_market': 'CAD',
-    'ch_market': 'CHF',
+_SUBUNIT_CONVERSION = {
+    'GBp': {'currency': 'GBP', 'units': '0.01'},
+    'ILA': {'currency': 'ILS', 'units': '0.01'},
+    'ZAc': {'currency': 'ZAR', 'units': '0.01'}
 }
-
-
-def parse_currency(result: Dict[str, Any]) -> Optional[str]:
-    """Infer the currency from the result."""
-    if 'market' not in result:
-        return None
-    return _MARKETS.get(result['market'], None)
 
 
 _DEFAULT_PARAMS = {
@@ -69,6 +61,14 @@ _DEFAULT_PARAMS = {
     'corsDomain': 'finance.yahoo.com',
     '.tsrc': 'finance',
 }
+
+def convert_subunit_to_currency(price: Decimal, subunit: str) -> Decimal:
+    """Convert subunits to currency"""
+
+    conversion = _SUBUNIT_CONVERSION.get(subunit, None)
+    if conversion is None:
+        return price
+    return price * Decimal(conversion['units'])
 
 
 def get_price_series(ticker: str,
@@ -99,10 +99,14 @@ def get_price_series(ticker: str,
 
     timestamp_array = result['timestamp']
     close_array = result['indicators']['quote'][0]['close']
-    series = [(datetime.fromtimestamp(timestamp, tz=tzone), Decimal(price))
+    currency = result['meta']['currency']
+
+    series = [(datetime.fromtimestamp(timestamp, tz=tzone), convert_subunit_to_currency(Decimal(price), currency))
               for timestamp, price in zip(timestamp_array, close_array)]
 
-    currency = result['meta']['currency']
+    conversion = _SUBUNIT_CONVERSION.get(currency, None)
+    if conversion is not None:
+        currency = conversion['currency']
     return series, currency
 
 
@@ -112,11 +116,8 @@ class Source(source.Source):
     def get_latest_price(self, ticker: str) -> Optional[source.SourcePrice]:
         """See contract in beanprice.source.Source."""
 
-        url = "https://query1.finance.yahoo.com/v7/finance/quote"
-        fields = ['symbol', 'regularMarketPrice', 'regularMarketTime']
+        url = "https://query1.finance.yahoo.com/v7/finance/options/{}".format(ticker)
         payload = {
-            'symbols': ticker,
-            'fields': ','.join(fields),
             'exchange': 'NYSE',
         }
         payload.update(_DEFAULT_PARAMS)
@@ -128,18 +129,22 @@ class Source(source.Source):
             # but the user definitely needs to know which ticker failed!
             raise YahooError("%s (ticker: %s)" % (error, ticker)) from error
         try:
-            price = Decimal(result['regularMarketPrice'])
+            price = Decimal(result['quote']['regularMarketPrice'])
 
             tzone = timezone(
-                timedelta(hours=result['gmtOffSetMilliseconds'] / 3600000),
-                result['exchangeTimezoneName'])
-            trade_time = datetime.fromtimestamp(result['regularMarketTime'],
+                timedelta(hours=result['quote']['gmtOffSetMilliseconds'] / 3600000),
+                result['quote']['exchangeTimezoneName'])
+            trade_time = datetime.fromtimestamp(result['quote']['regularMarketTime'],
                                                 tz=tzone)
         except KeyError as exc:
             raise YahooError("Invalid response from Yahoo: {}".format(
                 repr(result))) from exc
 
-        currency = parse_currency(result)
+        currency = result['quote']['currency']
+        price = convert_subunit_to_currency(Decimal(price), currency)
+        conversion = _SUBUNIT_CONVERSION.get(currency, None)
+        if conversion is not None:
+            currency = conversion['currency']
 
         return source.SourcePrice(price, trade_time, currency)
 
