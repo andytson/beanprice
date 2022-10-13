@@ -102,7 +102,7 @@ def get_price_series(ticker: str,
     currency = result['meta']['currency']
 
     series = [(datetime.fromtimestamp(timestamp, tz=tzone), convert_subunit_to_currency(Decimal(price), currency))
-              for timestamp, price in zip(timestamp_array, close_array)]
+              for timestamp, price in zip(timestamp_array, close_array) if price is not None]
 
     conversion = _SUBUNIT_CONVERSION.get(currency, None)
     if conversion is not None:
